@@ -1,6 +1,6 @@
 ---
 name: devdb
-description: Levanta, consulta y destruye bases de datos locales de prueba (PostgreSQL, MySQL, MongoDB, Redis y la base vectorial Qdrant) con el CLI `devdb`. Úsalo cuando necesites una base de datos real para ejecutar la app, correr tests de integración, probar migraciones o consultas SQL/Mongo/Redis, una base vectorial para RAG, embeddings o memoria de agentes, u obtener una URL de conexión (DATABASE_URL, REDIS_URL, QDRANT_URL, etc.) en desarrollo local.
+description: Levanta, consulta y destruye bases de datos locales de prueba (PostgreSQL, MySQL, MongoDB, Redis y la base vectorial Qdrant) con el CLI `devdb`. Úsalo cuando necesites una base de datos real para ejecutar la app, correr tests de integración, probar migraciones o consultas SQL/Mongo/Redis, una base vectorial para RAG, embeddings o memoria de agentes (Qdrant o pgvector dentro de Postgres), u obtener una URL de conexión (DATABASE_URL, REDIS_URL, QDRANT_URL, etc.) en desarrollo local.
 ---
 
 # devdb — bases de datos de prueba locales
@@ -36,8 +36,8 @@ devdb down                                # al terminar, si tú lo levantaste
 
 | Comando | Qué hace |
 |---|---|
-| `devdb up <dbs...> [--ram\|--persist] [--no-ui]` | Levanta y espera healthcheck. dbs: `postgres mysql mongo redis qdrant all` |
-| `devdb status --json` | Estado, salud (`healthy`), puertos y URLs de cada base |
+| `devdb up <dbs...> [--ram\|--persist] [--no-ui] [--pgvector]` | Levanta y espera healthcheck. dbs: `postgres mysql mongo redis qdrant all` |
+| `devdb status --json` | Estado, salud (`healthy`), puertos, URLs de cada base y si `pgvector` está activo |
 | `devdb url <db>` | URL desde el host (`localhost`) |
 | `devdb url <db> --docker` | URL desde otro contenedor en la red `devdb-net` (host = nombre del servicio) |
 | `devdb env [--all]` | Líneas `POSTGRES_URL=...`, `MYSQL_URL=...`, `MONGO_URL=...`, `REDIS_URL=...`, `QDRANT_URL=...` |
@@ -57,9 +57,20 @@ devdb shell redis    -- GET mi-clave
 devdb shell postgres < schema.sql
 ```
 
-## Base de datos vectorial (Qdrant)
+## Búsqueda vectorial
 
-Para RAG, búsqueda semántica o memoria de agentes usa Qdrant (`devdb up qdrant --ram`). No tiene consola:
+Hay dos opciones:
+
+- **pgvector** si el proyecto ya usa PostgreSQL y quiere los embeddings junto a sus tablas:
+  `devdb up postgres --pgvector`. La extensión `vector` queda creada en la base; usa SQL (`vector(384)`,
+  índice `hnsw`, operador `<=>` para distancia coseno). La opción se recuerda; `--no-pgvector` la desactiva.
+  Si al activarla o desactivarla aparece un aviso sobre índices de texto, pregunta al usuario antes de ejecutar
+  `devdb reset postgres` (borra datos).
+- **Qdrant** como base vectorial dedicada (colecciones, filtros por payload, panel web).
+
+### Qdrant
+
+Levántalo con `devdb up qdrant --ram`. No tiene consola:
 `devdb shell qdrant` llama a su API REST (requiere `curl` en el host). El tamaño del vector (`size`) debe coincidir
 con el modelo de embeddings que uses.
 

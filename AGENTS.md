@@ -43,6 +43,10 @@ exporta otros antes de probar (p. ej. `POSTGRES_PORT=15432 ./devdb up postgres`)
 - **Perfiles:** cada base tiene perfil `<db>` y cada panel `<nombre-del-panel>`; todos tienen además `all`. El CLI
   asigna los paneles en `ui_of()` (postgres/mysql → adminer, mongo → mongo-express, redis → redis-commander).
   Qdrant no tiene contenedor de panel: su dashboard va integrado (`qdrant-dashboard` en `status` es virtual).
+- **pgvector es una variante de la imagen de Postgres, no un servicio aparte:** `compose.yml` usa
+  `${POSTGRES_IMAGE:-postgres:${POSTGRES_VERSION}}`. Con `--pgvector` (guardado como `PGVECTOR` en `.devdb.state`),
+  `compose()` exporta `POSTGRES_IMAGE` con `pgvector_image()` (misma versión mayor que `POSTGRES_VERSION`), salvo que
+  el usuario la haya definido en `.env`. Tras `up`/`reset`, `enable_pgvector()` ejecuta `CREATE EXTENSION IF NOT EXISTS vector`.
 - **Qdrant no tiene cliente de consola:** `devdb shell qdrant` es `qdrant_http()`, un atajo a su API REST vía `curl`
   en el host. Su imagen no trae curl/wget; por eso el healthcheck usa `/dev/tcp` de bash.
 - **Nombre de proyecto `devdb`, red `devdb-net`:** son fijos. Otros proyectos se conectan a la red por nombre y
