@@ -5,7 +5,7 @@ Para **usar** el entorno desde otro proyecto, consulta el skill en [`skills/devd
 
 ## Qué es
 
-Un entorno local de bases de datos de prueba (PostgreSQL, MySQL, MongoDB, Redis, Qdrant vectorial y paneles web) sobre Docker Compose,
+Un entorno local de bases de datos de prueba (PostgreSQL con pgvector opcional, MySQL, MongoDB, Redis, Qdrant vectorial y paneles web) sobre Docker Compose,
 con un CLI en Bash (`devdb`) que sirve tanto a humanos (asistente interactivo) como a scripts y agentes (flags, `--json`,
 códigos de salida). No hay código de aplicación ni build; la documentación de usuario (`README.md`) está en español.
 
@@ -25,6 +25,8 @@ códigos de salida). No hay código de aplicación ni build; la documentación d
 
 ```sh
 ./devdb up postgres redis --ram --no-ui   # levantar (espera healthchecks)
+./devdb up postgres --pgvector            # Postgres con la extensión vector
+./devdb shell qdrant GET /collections     # API REST de Qdrant
 ./devdb status --json                     # estado legible por máquina
 ./devdb down [--volumes]                  # detener
 bash -n devdb                             # validar sintaxis del CLI
