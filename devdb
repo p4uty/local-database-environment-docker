@@ -1,0 +1,476 @@
+#!/usr/bin/env bash
+# devdb — entorno local de bases de datos de prueba (PostgreSQL, MySQL, MongoDB, Redis).
+# Envoltorio de `docker compose`: interactivo para humanos, predecible para scripts y agentes.
+# Ejecuta `devdb help` para ver el uso.
+
+set -euo pipefail
+
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "devdb requiere bash >= 4 (en macOS: brew install bash)" >&2
+  exit 1
+fi
+
+VERSION="1.0.0"
+ALL_DBS=(postgres mysql mongo redis)
+
+# Resuelve el directorio real del repo aunque el script se invoque vía symlink (devdb install).
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(dirname "$SELF")"
+STATE_FILE="$ROOT/.devdb.state"
+
+# ---------- Configuración (.env con los mismos valores por defecto que compose.yml) ----------
+
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+DB_USER="${DB_USER:-dev}"
+DB_PASSWORD="${DB_PASSWORD:-devpass}"
+DB_NAME="${DB_NAME:-devdb}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+MONGO_PORT="${MONGO_PORT:-27017}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+ADMINER_PORT="${ADMINER_PORT:-8080}"
+MONGO_EXPRESS_PORT="${MONGO_EXPRESS_PORT:-8081}"
+REDIS_COMMANDER_PORT="${REDIS_COMMANDER_PORT:-8082}"
+
+# ---------- Utilidades de salida ----------
+
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+  C_OK=$'\e[32m' C_WARN=$'\e[33m' C_ERR=$'\e[31m' C_DIM=$'\e[2m' C_BOLD=$'\e[1m' C_OFF=$'\e[0m'
+else
+  C_OK="" C_WARN="" C_ERR="" C_DIM="" C_BOLD="" C_OFF=""
+fi
+QUIET=0
+
+# Los mensajes van a stderr; stdout queda reservado para datos (URLs, JSON, env) que otros programas consumen.
+info() { [[ $QUIET == 1 ]] || printf '%s\n' "$*" >&2; }
+ok()   { [[ $QUIET == 1 ]] || printf '%s✔%s %s\n' "$C_OK" "$C_OFF" "$*" >&2; }
+warn() { printf '%s!%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
+die()  { printf '%s✖%s %s\n' "$C_ERR" "$C_OFF" "$1" >&2; exit "${2:-1}"; }
+usage_error() { die "$1 (ver: devdb help)" 2; }
+
+is_db() { local d; for d in "${ALL_DBS[@]}"; do [[ $1 == "$d" ]] && return 0; done; return 1; }
+
+# Acepta alias comunes (pg, mongodb, ...) y devuelve el nombre canónico.
+normalize_db() {
+  case "${1,,}" in
+    postgres|postgresql|pg|psql) echo postgres ;;
+    mysql|mariadb)               echo mysql ;;
+    mongo|mongodb)               echo mongo ;;
+    redis)                       echo redis ;;
+    *) return 1 ;;
+  esac
+}
+
+require_db() {
+  [[ -n "${1:-}" ]] || usage_error "Falta el nombre de la base de datos (${ALL_DBS[*]})"
+  normalize_db "$1" || usage_error "Base de datos desconocida: '$1'. Opciones: ${ALL_DBS[*]}"
+}
+
+interactive() { [[ -t 0 && -t 1 && -z "${CI:-}" ]]; }
+
+# ---------- Estado (última selección) ----------
+
+S_DBS="" S_MODE="ram" S_UI="1"
+load_state() {
+  [[ -f "$STATE_FILE" ]] || return 0
+  # shellcheck disable=SC1090
+  source "$STATE_FILE"
+  S_DBS="${DBS:-}" S_MODE="${MODE:-ram}" S_UI="${UI:-1}"
+}
+save_state() {
+  printf 'DBS="%s"\nMODE="%s"\nUI="%s"\n' "$1" "$2" "$3" > "$STATE_FILE"
+}
+
+# ---------- Docker Compose ----------
+
+check_docker() {
+  command -v docker >/dev/null 2>&1 || die "Docker no está instalado: https://docs.docker.com/get-docker/"
+  docker compose version >/dev/null 2>&1 || die "Falta el plugin 'docker compose' (v2)."
+  docker info >/dev/null 2>&1 || die "No se puede hablar con el daemon de Docker. ¿Está corriendo? ¿Tu usuario tiene permisos?"
+}
+
+# compose <modo> [args...] — modo: ram | persist
+compose() {
+  local mode="$1"; shift
+  docker compose --project-directory "$ROOT" -f "$ROOT/compose.yml" -f "$ROOT/compose.$mode.yml" "$@"
+}
+
+port_of() {
+  case "$1" in
+    postgres) echo "$POSTGRES_PORT" ;; mysql) echo "$MYSQL_PORT" ;;
+    mongo) echo "$MONGO_PORT" ;;       redis) echo "$REDIS_PORT" ;;
+  esac
+}
+
+internal_port_of() {
+  case "$1" in
+    postgres) echo 5432 ;; mysql) echo 3306 ;; mongo) echo 27017 ;; redis) echo 6379 ;;
+  esac
+}
+
+# url_of <db> [host|docker]
+url_of() {
+  local db="$1" where="${2:-host}" host port
+  if [[ $where == docker ]]; then host="$db"; port="$(internal_port_of "$db")"
+  else host="localhost"; port="$(port_of "$db")"; fi
+  case "$db" in
+    postgres) echo "postgresql://$DB_USER:$DB_PASSWORD@$host:$port/$DB_NAME" ;;
+    mysql)    echo "mysql://$DB_USER:$DB_PASSWORD@$host:$port/$DB_NAME" ;;
+    mongo)    echo "mongodb://$DB_USER:$DB_PASSWORD@$host:$port/$DB_NAME?authSource=admin" ;;
+    redis)    echo "redis://$host:$port/0" ;;
+  esac
+}
+
+ui_of() {
+  case "$1" in
+    postgres|mysql) echo adminer ;; mongo) echo mongo-express ;; redis) echo redis-commander ;;
+  esac
+}
+
+ui_url_of() {
+  case "$1" in
+    adminer) echo "http://localhost:$ADMINER_PORT" ;;
+    mongo-express) echo "http://localhost:$MONGO_EXPRESS_PORT" ;;
+    redis-commander) echo "http://localhost:$REDIS_COMMANDER_PORT" ;;
+  esac
+}
+
+# Imprime "servicio<TAB>estado<TAB>salud" de los contenedores del proyecto.
+service_states() {
+  docker ps -a --filter "label=com.docker.compose.project=devdb" \
+    --format '{{.Label "com.docker.compose.service"}}	{{.State}}	{{if .Status}}{{.Status}}{{end}}' 2>/dev/null |
+  while IFS=$'\t' read -r svc state status; do
+    local health="none"
+    case "$status" in
+      *"(healthy)"*) health="healthy" ;; *"(unhealthy)"*) health="unhealthy" ;;
+      *"(health: starting)"*) health="starting" ;;
+    esac
+    printf '%s\t%s\t%s\n' "$svc" "$state" "$health"
+  done
+}
+
+running_dbs() {
+  service_states | awk -F'\t' '$2=="running"{print $1}' |
+    while read -r svc; do is_db "$svc" && echo "$svc"; done || true
+}
+
+# ---------- Modo interactivo ----------
+
+ask_yn() { # ask_yn "pregunta" default(y|n)
+  local q="$1" def="$2" hint ans
+  [[ $def == y ]] && hint="S/n" || hint="s/N"
+  read -r -p "  $q [$hint] " ans </dev/tty || ans=""
+  ans="${ans,,}"; [[ -z $ans ]] && ans="$def"
+  [[ $ans == y || $ans == s || $ans == si || $ans == sí || $ans == yes ]]
+}
+
+interactive_setup() { # sets SEL_DBS, SEL_MODE, SEL_UI
+  load_state
+  local defaults=" ${S_DBS:-postgres} " db def
+  SEL_DBS=()
+  printf '\n%sdevdb%s — ¿qué quieres levantar?\n\n' "$C_BOLD" "$C_OFF" >&2
+  printf '%sBases de datos:%s\n' "$C_BOLD" "$C_OFF" >&2
+  for db in "${ALL_DBS[@]}"; do
+    [[ $defaults == *" $db "* ]] && def=y || def=n
+    ask_yn "$db" "$def" && SEL_DBS+=("$db")
+  done
+  (( ${#SEL_DBS[@]} )) || die "No elegiste ninguna base de datos."
+
+  printf '\n%sAlmacenamiento:%s\n' "$C_BOLD" "$C_OFF" >&2
+  printf '  1) Temporal (RAM) — rápido, se borra al recrear el contenedor\n' >&2
+  printf '  2) Persistente (volumen) — los datos sobreviven reinicios\n' >&2
+  local choice defc=1; [[ $S_MODE == persist ]] && defc=2
+  read -r -p "  Opción [$defc] " choice </dev/tty || choice=""
+  case "${choice:-$defc}" in
+    1) SEL_MODE=ram ;; 2) SEL_MODE=persist ;; *) die "Opción inválida: $choice" 2 ;;
+  esac
+
+  printf '\n%sPaneles web:%s\n' "$C_BOLD" "$C_OFF" >&2
+  [[ $S_UI == 1 ]] && def=y || def=n
+  if ask_yn "¿Incluir paneles web (Adminer, Mongo Express, Redis Commander)?" "$def"; then SEL_UI=1; else SEL_UI=0; fi
+  echo >&2
+}
+
+# ---------- Comandos ----------
+
+cmd_up() {
+  local dbs=() mode="" ui="" arg db
+  while (($#)); do
+    arg="$1"; shift
+    case "$arg" in
+      --ram) mode=ram ;;
+      --persist|--persistent) mode=persist ;;
+      --ui) ui=1 ;;
+      --no-ui) ui=0 ;;
+      all) dbs=("${ALL_DBS[@]}") ;;
+      -*) usage_error "Opción desconocida para 'up': $arg" ;;
+      *) db="$(require_db "$arg")"; dbs+=("$db") ;;
+    esac
+  done
+
+  check_docker
+  load_state
+  if (( ${#dbs[@]} == 0 )); then
+    if interactive && [[ -z $mode && -z $ui ]]; then
+      interactive_setup
+      dbs=("${SEL_DBS[@]}") mode="$SEL_MODE" ui="$SEL_UI"
+    elif [[ -n $S_DBS ]]; then
+      read -r -a dbs <<<"$S_DBS"
+      info "${C_DIM}Usando la última selección: ${dbs[*]}${C_OFF}"
+    else
+      usage_error "Indica qué bases de datos levantar, p. ej.: devdb up postgres redis"
+    fi
+  fi
+  mode="${mode:-$S_MODE}" ui="${ui:-$S_UI}"
+
+  # Si cambia el modo de almacenamiento, los contenedores se recrean con el nuevo montaje.
+  local profiles=() uis=() u
+  for db in "${dbs[@]}"; do
+    profiles+=(--profile "$db")
+    if [[ $ui == 1 ]]; then
+      u="$(ui_of "$db")"
+      [[ " ${uis[*]-} " == *" $u "* ]] || uis+=("$u")
+    fi
+  done
+  for u in "${uis[@]}"; do profiles+=(--profile "$u"); done
+
+  local label; [[ $mode == ram ]] && label="temporal (RAM)" || label="persistente (volumen)"
+  info "Levantando ${C_BOLD}${dbs[*]}${C_OFF} · almacenamiento ${C_BOLD}$label${C_OFF}${uis[*]:+ · paneles: ${uis[*]}}"
+
+  local out
+  if ! out="$(compose "$mode" "${profiles[@]}" up -d --wait --wait-timeout "${DEVDB_TIMEOUT:-180}" --remove-orphans 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    die "No se pudo levantar el entorno. Revisa: devdb logs <db>  (¿puerto ocupado? cámbialo en .env)"
+  fi
+  # El estado guarda todo lo que quedó corriendo (lo nuevo más lo que ya estaba).
+  local running; running="$(running_dbs | tr '\n' ' ')"
+  save_state "${running% }" "$mode" "$ui"
+
+  for db in "${dbs[@]}"; do ok "$db listo → $(url_of "$db")"; done
+  for u in "${uis[@]}"; do ok "$u → $(ui_url_of "$u")"; done
+  info "${C_DIM}Siguiente: 'devdb env' para las variables de conexión, 'devdb shell <db>' para una consola.${C_OFF}"
+}
+
+cmd_down() {
+  local volumes=0
+  case "${1:-}" in
+    "") ;; -v|--volumes) volumes=1 ;; *) usage_error "Opción desconocida para 'down': $1" ;;
+  esac
+  check_docker
+  local out
+  if (( volumes )); then
+    out="$(compose persist --profile all down --volumes --remove-orphans 2>&1)" || { printf '%s\n' "$out" >&2; die "No se pudo detener el entorno."; }
+    ok "Entorno detenido y volúmenes borrados."
+  else
+    load_state
+    out="$(compose "$S_MODE" --profile all down --remove-orphans 2>&1)" || { printf '%s\n' "$out" >&2; die "No se pudo detener el entorno."; }
+    ok "Entorno detenido.${C_DIM} (los volúmenes persistentes se conservan; usa --volumes para borrarlos)${C_OFF}"
+  fi
+}
+
+cmd_status() {
+  local json=0
+  case "${1:-}" in "") ;; --json) json=1 ;; *) usage_error "Opción desconocida para 'status': $1" ;; esac
+  check_docker
+  load_state
+
+  local states db line state health first=1 u
+  states="$(service_states)"
+  lookup() { awk -F'\t' -v s="$1" '$1==s{print $2"\t"$3}' <<<"$states"; }
+
+  if (( json )); then
+    printf '{"mode":"%s","databases":[' "$S_MODE"
+    for db in "${ALL_DBS[@]}"; do
+      line="$(lookup "$db")"; state="${line%%$'\t'*}"; health="${line#*$'\t'}"
+      [[ -z $line ]] && state="absent" health="none"
+      (( first )) || printf ','; first=0
+      printf '{"name":"%s","state":"%s","health":"%s","port":%s,"url":"%s","docker_url":"%s"}' \
+        "$db" "$state" "$health" "$(port_of "$db")" "$(url_of "$db")" "$(url_of "$db" docker)"
+    done
+    printf '],"ui":['; first=1
+    for u in adminer mongo-express redis-commander; do
+      line="$(lookup "$u")"; state="${line%%$'\t'*}"; [[ -z $line ]] && state="absent"
+      (( first )) || printf ','; first=0
+      printf '{"name":"%s","state":"%s","url":"%s"}' "$u" "$state" "$(ui_url_of "$u")"
+    done
+    printf ']}\n'
+    return
+  fi
+
+  local label; [[ $S_MODE == ram ]] && label="temporal (RAM)" || label="persistente (volumen)"
+  printf '%sAlmacenamiento:%s %s\n\n' "$C_BOLD" "$C_OFF" "$label"
+  printf '%-16s %-10s %-10s %s\n' SERVICIO ESTADO SALUD CONEXIÓN
+  for db in "${ALL_DBS[@]}" adminer mongo-express redis-commander; do
+    line="$(lookup "$db")"
+    [[ -z $line ]] && continue
+    state="${line%%$'\t'*}"; health="${line#*$'\t'}"
+    if is_db "$db"; then u="$(url_of "$db")"; else u="$(ui_url_of "$db")"; fi
+    printf '%-16s %-10s %-10s %s\n' "$db" "$state" "$health" "$u"
+  done
+  [[ -n $states ]] || info "${C_DIM}No hay nada corriendo. Empieza con: devdb up${C_OFF}"
+}
+
+cmd_url() {
+  local db where=host
+  db="$(require_db "${1:-}")"
+  [[ "${2:-}" == --docker ]] && where=docker
+  url_of "$db" "$where"
+}
+
+cmd_env() {
+  local where=host dbs=() db arg
+  for arg in "$@"; do
+    case "$arg" in
+      --docker) where=docker ;;
+      --all) dbs=("${ALL_DBS[@]}") ;;
+      *) usage_error "Opción desconocida para 'env': $arg" ;;
+    esac
+  done
+  if (( ${#dbs[@]} == 0 )); then
+    check_docker
+    mapfile -t dbs < <(running_dbs)
+    (( ${#dbs[@]} )) || die "No hay bases de datos corriendo. Usa 'devdb up' o 'devdb env --all'."
+  fi
+  for db in "${dbs[@]}"; do
+    printf '%s_URL=%s\n' "${db^^}" "$(url_of "$db" "$where")"
+  done
+}
+
+cmd_shell() {
+  local db; db="$(require_db "${1:-}")"; shift || true
+  [[ "${1:-}" == -- ]] && shift
+  check_docker
+  load_state
+  running_dbs | grep -qx "$db" || die "$db no está corriendo. Levántalo con: devdb up $db"
+
+  # Sin TTY (scripts, agentes, tuberías) se desactiva la pseudo-terminal para poder leer stdin.
+  local tty=(); [[ -t 0 && -t 1 ]] || tty=(-T)
+  exec_in() { compose "$S_MODE" --profile "$db" exec "$@"; }
+  case "$db" in
+    postgres) exec_in "${tty[@]}" postgres psql -U "$DB_USER" -d "$DB_NAME" "$@" ;;
+    mysql)    exec_in "${tty[@]}" -e MYSQL_PWD="$DB_PASSWORD" mysql mysql -u "$DB_USER" "$DB_NAME" "$@" ;;
+    mongo)    exec_in "${tty[@]}" mongo mongosh --quiet -u "$DB_USER" -p "$DB_PASSWORD" --authenticationDatabase admin "$DB_NAME" "$@" ;;
+    redis)    exec_in "${tty[@]}" redis redis-cli "$@" ;;
+  esac
+}
+
+cmd_logs() {
+  local svc=()
+  if [[ -n "${1:-}" && "$1" != -* ]]; then svc=("$(require_db "$1")"); shift; fi
+  check_docker
+  load_state
+  compose "$S_MODE" --profile all logs --tail "${DEVDB_LOG_LINES:-100}" "$@" "${svc[@]}"
+}
+
+cmd_reset() {
+  local db; db="$(require_db "${1:-}")"
+  check_docker
+  load_state
+  info "Reiniciando $db desde cero (se borran sus datos y se vuelven a ejecutar los scripts de init/$db)…"
+  compose "$S_MODE" --profile "$db" rm -sf "$db" >/dev/null 2>&1 || true
+  docker volume rm "devdb_${db}-data" >/dev/null 2>&1 || true
+  local out
+  out="$(compose "$S_MODE" --profile "$db" up -d --wait --wait-timeout "${DEVDB_TIMEOUT:-180}" "$db" 2>&1)" ||
+    { printf '%s\n' "$out" >&2; die "No se pudo recrear $db."; }
+  ok "$db reiniciado → $(url_of "$db")"
+}
+
+cmd_install() {
+  local bindir="${DEVDB_BIN_DIR:-$HOME/.local/bin}" skill=0 arg
+  for arg in "$@"; do
+    case "$arg" in --skill) skill=1 ;; *) usage_error "Opción desconocida para 'install': $arg" ;; esac
+  done
+  mkdir -p "$bindir"
+  ln -sfn "$SELF" "$bindir/devdb"
+  ok "CLI instalado: $bindir/devdb → $SELF"
+  [[ ":$PATH:" == *":$bindir:"* ]] || warn "$bindir no está en tu PATH. Agrega a tu shell: export PATH=\"$bindir:\$PATH\""
+  if (( skill )); then
+    mkdir -p "$HOME/.claude/skills"
+    ln -sfn "$ROOT/skills/devdb" "$HOME/.claude/skills/devdb"
+    ok "Skill instalado para Claude Code: ~/.claude/skills/devdb"
+  fi
+}
+
+cmd_uninstall() {
+  local bindir="${DEVDB_BIN_DIR:-$HOME/.local/bin}"
+  [[ -L "$bindir/devdb" ]] && rm "$bindir/devdb" && ok "Eliminado $bindir/devdb"
+  [[ -L "$HOME/.claude/skills/devdb" ]] && rm "$HOME/.claude/skills/devdb" && ok "Eliminado ~/.claude/skills/devdb"
+  return 0
+}
+
+cmd_help() {
+  cat <<EOF
+${C_BOLD}devdb${C_OFF} $VERSION — bases de datos de prueba locales con Docker
+
+${C_BOLD}USO${C_OFF}
+  devdb                                   Asistente interactivo (igual que 'devdb up' sin argumentos)
+  devdb up [dbs...] [--ram|--persist] [--ui|--no-ui]
+                                          Levanta y espera a que estén listas. dbs: ${ALL_DBS[*]} | all
+  devdb down [--volumes]                  Detiene todo. --volumes borra también los datos persistentes
+  devdb status [--json]                   Estado, salud y URLs de conexión
+  devdb url <db> [--docker]               Imprime la URL de conexión (--docker: host interno de la red)
+  devdb env [--all] [--docker]            Imprime POSTGRES_URL=... etc. (para .env o eval)
+  devdb shell <db> [-- args...]           Consola: psql, mysql, mongosh o redis-cli
+  devdb logs [db] [--follow]              Logs de los contenedores
+  devdb reset <db>                        Borra los datos de una base y re-ejecuta init/<db>/
+  devdb install [--skill]                 Instala 'devdb' en ~/.local/bin (y el skill de Claude Code)
+  devdb uninstall                         Revierte 'install'
+
+${C_BOLD}OPCIONES GLOBALES${C_OFF}
+  -q, --quiet     Sin mensajes informativos (solo errores y datos)
+  -h, --help      Esta ayuda
+  -V, --version   Versión
+
+${C_BOLD}EJEMPLOS${C_OFF}
+  devdb up postgres redis                 # en RAM (por defecto), con paneles web
+  devdb up mysql --persist --no-ui        # datos persistentes, sin paneles
+  devdb env >> .env                       # conecta tu app
+  devdb shell postgres -- -c 'select 1'   # consulta puntual (ideal para scripts/agentes)
+  devdb shell mysql < schema.sql          # ejecuta un archivo SQL
+  devdb status --json | jq                # estado legible por máquinas
+
+${C_BOLD}CÓDIGOS DE SALIDA${C_OFF}  0 ok · 1 error · 2 uso incorrecto
+Configuración: $ROOT/.env (ver .env.example)
+EOF
+}
+
+# ---------- Entrada ----------
+
+main() {
+  local args=()
+  while (($#)); do
+    case "$1" in
+      -q|--quiet) QUIET=1 ;;
+      -h|--help) args+=(help) ;;
+      -V|--version) echo "devdb $VERSION"; exit 0 ;;
+      --) args+=("$@"); break ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+  set -- "${args[@]+"${args[@]}"}"
+
+  local cmd="${1:-up}"; (($#)) && shift
+  case "$cmd" in
+    up|start)       cmd_up "$@" ;;
+    down|stop)      cmd_down "$@" ;;
+    status|ps)      cmd_status "$@" ;;
+    url)            cmd_url "$@" ;;
+    env)            cmd_env "$@" ;;
+    shell|sh|cli)   cmd_shell "$@" ;;
+    logs)           cmd_logs "$@" ;;
+    reset)          cmd_reset "$@" ;;
+    install)        cmd_install "$@" ;;
+    uninstall)      cmd_uninstall ;;
+    help)           cmd_help ;;
+    version)        echo "devdb $VERSION" ;;
+    *)              usage_error "Comando desconocido: '$cmd'" ;;
+  esac
+}
+
+main "$@"

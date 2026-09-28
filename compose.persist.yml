@@ -1,0 +1,23 @@
+# Capa de almacenamiento PERSISTENTE: los datos viven en volúmenes de Docker
+# y sobreviven a reinicios y recreaciones. Se borran con `./devdb down --volumes`.
+
+services:
+  postgres:
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+  mysql:
+    volumes:
+      - mysql-data:/var/lib/mysql
+  mongo:
+    volumes:
+      - mongo-data:/data/db
+  redis:
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  mysql-data:
+  mongo-data:
+  redis-data:

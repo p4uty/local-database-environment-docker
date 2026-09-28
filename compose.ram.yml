@@ -1,0 +1,16 @@
+# Capa de almacenamiento TEMPORAL: los datos viven en RAM (tmpfs)
+# y se pierden cada vez que el contenedor se recrea.
+
+services:
+  postgres:
+    tmpfs:
+      - /var/lib/postgresql/data
+  mysql:
+    tmpfs:
+      - /var/lib/mysql
+  mongo:
+    tmpfs:
+      - /data/db
+  redis:
+    tmpfs:
+      - /data
