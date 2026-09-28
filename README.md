@@ -1,6 +1,6 @@
 # devdb — Entorno local de bases de datos con Docker
 
-Levanta **PostgreSQL, MySQL, MongoDB y Redis** (con sus paneles web) en segundos, elige **cuáles** quieres y si los datos
+Levanta **PostgreSQL, MySQL, MongoDB, Redis y Qdrant** (base de datos vectorial) con sus paneles web en segundos, elige **cuáles** quieres y si los datos
 deben ser **temporales (en RAM)** o **persistentes (en un volumen)**. Pensado para desarrollo local, pruebas de
 integración, CI, prototipos y **agentes de IA**.
 
@@ -35,12 +35,14 @@ integración, CI, prototipos y **agentes de IA**.
 
 ## Características
 
-- **Elige tus bases de datos:** levanta solo las que necesitas (`postgres`, `mysql`, `mongo`, `redis` o `all`).
+- **Elige tus bases de datos:** levanta solo las que necesitas (`postgres`, `mysql`, `mongo`, `redis`, `qdrant` o `all`).
+- **Base de datos vectorial incluida:** [Qdrant](https://qdrant.tech) para RAG, búsqueda semántica y memoria de agentes.
 - **Temporal o persistente:** datos en RAM (se borran al recrear) o en volúmenes de Docker (sobreviven reinicios).
 - **Asistente interactivo** para humanos y **flags + salida JSON** para scripts y agentes.
 - **Espera real a que estén listas:** healthchecks en cada base; `up` no termina hasta que aceptan conexiones.
 - **URLs de conexión al instante:** `devdb url`, `devdb env` y `devdb status --json`.
-- **Consola integrada:** `devdb shell` abre `psql`, `mysql`, `mongosh` o `redis-cli` sin instalarlos en tu máquina.
+- **Consola integrada:** `devdb shell` abre `psql`, `mysql`, `mongosh` o `redis-cli` sin instalarlos en tu máquina
+  (y para Qdrant, un atajo a su API REST).
 - **Esquemas y semillas:** coloca `.sql` / `.js` en `init/` y se aplican al crear la base; `devdb reset` los reaplica.
 - **Configurable con `.env`:** puertos, credenciales y versiones de cada imagen.
 - **Seguro por defecto:** los puertos solo se publican en `127.0.0.1`, no en tu red local.
@@ -126,13 +128,14 @@ devdb down                          # detener todo
 | `devdb url <db> [--docker]` | Imprime la URL de conexión. `--docker` usa el host interno de la red Docker. |
 | `devdb env [--all] [--docker]` | Imprime `POSTGRES_URL=...`, `MYSQL_URL=...`, etc. de las bases que están corriendo (`--all`: todas). |
 | `devdb shell <db> [-- args...]` | Abre el cliente nativo. Los argumentos después de `--` se pasan al cliente. |
+| `devdb shell qdrant [MÉTODO] /ruta ['json' \| -]` | Llama a la API REST de Qdrant (requiere `curl`). `-` lee el cuerpo desde stdin. |
 | `devdb logs [db] [--follow]` | Muestra los logs (últimas 100 líneas; cámbialo con `DEVDB_LOG_LINES`). |
 | `devdb reset <db>` | Borra los datos de esa base y vuelve a ejecutar sus scripts de `init/<db>/`. |
 | `devdb install [--skill]` / `devdb uninstall` | Instala o quita el comando global y el skill de Claude Code. |
 | `devdb help` / `devdb --version` | Ayuda y versión. |
 
 **Opciones globales:** `-q` / `--quiet` oculta los mensajes informativos.
-**Alias aceptados:** `pg`, `postgresql` → `postgres`; `mongodb` → `mongo`.
+**Alias aceptados:** `pg`, `postgresql` → `postgres`; `mongodb` → `mongo`; `vector`, `vectordb` → `qdrant`.
 **Variables de entorno:** `DEVDB_TIMEOUT` (segundos de espera en `up`, por defecto 180), `DEVDB_BIN_DIR`
 (destino de `install`), `NO_COLOR` (desactiva colores).
 
@@ -171,9 +174,11 @@ Valores por defecto (todos configurables en `.env`):
 | MySQL 8.0 | `3306` | `mysql` | `dev` (o `root`) | `devpass` | `devdb` |
 | MongoDB 7.0 | `27017` | `mongo` | `dev` (en `admin`) | `devpass` | `devdb` |
 | Redis 7 | `6379` | `redis` | — | — (sin auth) | `0` |
+| Qdrant 1.19 (vectorial) | `6333` (REST), `6334` (gRPC) | `qdrant` | — | — (sin auth) | colecciones |
 | Adminer | [`8080`](http://localhost:8080) | `adminer` | | | |
 | Mongo Express | [`8081`](http://localhost:8081) | `mongo-express` | sin login | | |
 | Redis Commander | [`8082`](http://localhost:8082) | `redis-commander` | sin login | | |
+| Panel de Qdrant | [`6333/dashboard`](http://localhost:6333/dashboard) | integrado en `qdrant` | sin login | | |
 
 > ⚠️ Son credenciales de **desarrollo**. No expongas este entorno a internet.
 
@@ -191,8 +196,9 @@ Todas las variables son opcionales. Las más útiles:
 |---|---|---|
 | `DB_USER`, `DB_PASSWORD`, `DB_NAME` | `dev`, `devpass`, `devdb` | Credenciales comunes a las 4 bases |
 | `POSTGRES_PORT`, `MYSQL_PORT`, `MONGO_PORT`, `REDIS_PORT` | `5432`, `3306`, `27017`, `6379` | Cambia el puerto si ya lo usa otro servicio |
+| `QDRANT_PORT`, `QDRANT_GRPC_PORT` | `6333`, `6334` | Puertos REST y gRPC de Qdrant |
 | `ADMINER_PORT`, `MONGO_EXPRESS_PORT`, `REDIS_COMMANDER_PORT` | `8080`, `8081`, `8082` | Puertos de los paneles |
-| `POSTGRES_VERSION`, `MYSQL_VERSION`, `MONGO_VERSION`, `REDIS_VERSION` | `15-alpine`, `8.0-oracle`, `7.0-jammy`, `7-alpine` | Tag de cada imagen (p. ej. `POSTGRES_VERSION=17-alpine`) |
+| `POSTGRES_VERSION`, `MYSQL_VERSION`, `MONGO_VERSION`, `REDIS_VERSION`, `QDRANT_VERSION` | `15-alpine`, `8.0-oracle`, `7.0-jammy`, `7-alpine`, `v1.19.1` | Tag de cada imagen (p. ej. `POSTGRES_VERSION=17-alpine`) |
 | `BIND_ADDRESS` | `127.0.0.1` | `0.0.0.0` para acceder desde otros equipos de tu red |
 
 Las credenciales solo se aplican cuando la base se **crea**. Si las cambias en modo persistente, ejecuta
@@ -235,6 +241,7 @@ postgresql://dev:devpass@localhost:5432/devdb
 mysql://dev:devpass@localhost:3306/devdb
 mongodb://dev:devpass@localhost:27017/devdb?authSource=admin
 redis://localhost:6379/0
+http://localhost:6333            # Qdrant (QDRANT_URL)
 ```
 
 > En MongoDB el usuario se crea en la base `admin`, por eso la URL necesita `?authSource=admin`.
@@ -298,6 +305,34 @@ r = redis.Redis.from_url(os.environ["REDIS_URL"])
 </details>
 
 <details>
+<summary><b>Qdrant</b> (Python, TypeScript, LangChain)</summary>
+
+```python
+# pip install qdrant-client
+import os
+from qdrant_client import QdrantClient, models
+
+client = QdrantClient(url=os.environ["QDRANT_URL"])
+client.create_collection("docs", vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE))
+client.upsert("docs", points=[models.PointStruct(id=1, vector=[0.1] * 384, payload={"texto": "hola"})])
+hits = client.query_points("docs", query=[0.1] * 384, limit=3).points
+```
+
+```typescript
+// npm install @qdrant/js-client-rest
+import { QdrantClient } from '@qdrant/js-client-rest';
+const qdrant = new QdrantClient({ url: process.env.QDRANT_URL });
+```
+
+```python
+# LangChain: pip install langchain-qdrant
+from langchain_qdrant import QdrantVectorStore
+store = QdrantVectorStore.from_existing_collection(
+    embedding=mis_embeddings, collection_name="docs", url=os.environ["QDRANT_URL"])
+```
+</details>
+
+<details>
 <summary><b>Node.js</b> (pg, mysql2, mongodb)</summary>
 
 ```javascript
@@ -322,6 +357,7 @@ Se incluyen por defecto (desactívalos con `--no-ui`). Solo se levantan los pane
 | Adminer | http://localhost:8080 | PostgreSQL y MySQL |
 | Mongo Express | http://localhost:8081 | MongoDB (sin login) |
 | Redis Commander | http://localhost:8082 | Redis (sin login) |
+| Panel de Qdrant | http://localhost:6333/dashboard | Qdrant (integrado, siempre disponible) |
 
 > ⚠️ **En los paneles no uses `localhost` como servidor.** Los paneles corren en su propio contenedor, y para ellos
 > `localhost` es el propio panel. Usa el **nombre del servicio**: `postgres`, `mysql`, `mongo` o `redis`.
@@ -351,6 +387,9 @@ devdb shell mysql    -- -Nse "SHOW TABLES"
 devdb shell mongo    -- --eval "db.users.countDocuments()"
 devdb shell redis    -- KEYS '*'
 devdb shell postgres < backup.sql
+devdb shell qdrant GET /collections
+devdb shell qdrant PUT /collections/docs '{"vectors":{"size":384,"distance":"Cosine"}}'
+devdb shell qdrant PUT '/collections/docs/points?wait=true' - < puntos.json
 ```
 
 Estado para máquinas:
@@ -394,6 +433,7 @@ Desde ese momento, en cualquier proyecto puedes pedir cosas como:
 
 > *"Levanta un Postgres temporal, aplica las migraciones y corre los tests de integración."*
 > *"Crea las tablas de `schema.sql` en una base MySQL de prueba y muéstrame cuántas filas quedaron."*
+> *"Levanta Qdrant, indexa los archivos de `docs/` y prueba la búsqueda semántica del agente."*
 
 El agente usará `devdb up postgres --ram --no-ui`, `devdb url postgres`, etc.
 
@@ -435,7 +475,7 @@ docker compose -f compose.yml -f compose.persist.yml --profile all up -d --wait
 docker compose -f compose.yml -f compose.ram.yml --profile all down
 ```
 
-Perfiles disponibles: `postgres`, `mysql`, `mongo`, `redis`, `adminer`, `mongo-express`, `redis-commander`, `all`.
+Perfiles disponibles: `postgres`, `mysql`, `mongo`, `redis`, `qdrant`, `adminer`, `mongo-express`, `redis-commander`, `all`.
 
 ---
 

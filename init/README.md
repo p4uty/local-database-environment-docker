@@ -9,7 +9,7 @@ en orden alfabético (usa prefijos como `01-schema.sql`, `02-seed.sql`).
 | `init/mysql/`    | `.sql`, `.sql.gz`, `.sh`         | `root` en `DB_NAME`       |
 | `init/mongo/`    | `.js`, `.sh`                     | `root` en `DB_NAME`       |
 
-Redis no tiene scripts de inicialización.
+Redis y Qdrant no tienen scripts de inicialización.
 
 - En modo **RAM** se vuelven a ejecutar cada vez que el contenedor se recrea.
 - En modo **persistente** solo se ejecutan la primera vez. Para repetirlos: `./devdb reset <db>`.

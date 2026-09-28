@@ -4,7 +4,7 @@
 #   docker compose -f compose.yml -f compose.persist.yml --profile postgres up -d --wait
 # O más fácil: ./devdb up postgres [--ram|--persist]
 #
-# Perfiles: postgres, mysql, mongo, redis (bases de datos)
+# Perfiles: postgres, mysql, mongo, redis, qdrant (bases de datos)
 #           adminer, mongo-express, redis-commander (paneles web)
 #           all (todo)
 # Toda la configuración se puede sobrescribir con un archivo .env (ver .env.example).
@@ -87,6 +87,23 @@ services:
       - "${BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    networks:
+      - dev-net
+
+  # Base de datos vectorial. Trae su propio panel web en /dashboard.
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_VERSION:-v1.19.1}
+    profiles: [qdrant, all]
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${QDRANT_PORT:-6333}:6333"
+      - "${BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
+    healthcheck:
+      # La imagen no incluye curl/wget: se consulta /readyz con el /dev/tcp de bash.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
       interval: 3s
       timeout: 3s
       retries: 40

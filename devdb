@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# devdb — entorno local de bases de datos de prueba (PostgreSQL, MySQL, MongoDB, Redis).
+# devdb — entorno local de bases de datos de prueba (PostgreSQL, MySQL, MongoDB, Redis, Qdrant).
 # Envoltorio de `docker compose`: interactivo para humanos, predecible para scripts y agentes.
 # Ejecuta `devdb help` para ver el uso.
 
@@ -11,7 +11,7 @@ if ((BASH_VERSINFO[0] < 4)); then
 fi
 
 VERSION="1.0.0"
-ALL_DBS=(postgres mysql mongo redis)
+ALL_DBS=(postgres mysql mongo redis qdrant)
 
 # Resuelve el directorio real del repo aunque el script se invoque vía symlink (devdb install).
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -33,6 +33,7 @@ POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
 MONGO_PORT="${MONGO_PORT:-27017}"
 REDIS_PORT="${REDIS_PORT:-6379}"
+QDRANT_PORT="${QDRANT_PORT:-6333}"
 ADMINER_PORT="${ADMINER_PORT:-8080}"
 MONGO_EXPRESS_PORT="${MONGO_EXPRESS_PORT:-8081}"
 REDIS_COMMANDER_PORT="${REDIS_COMMANDER_PORT:-8082}"
@@ -62,6 +63,7 @@ normalize_db() {
     mysql|mariadb)               echo mysql ;;
     mongo|mongodb)               echo mongo ;;
     redis)                       echo redis ;;
+    qdrant|vector|vectordb)      echo qdrant ;;
     *) return 1 ;;
   esac
 }
@@ -104,12 +106,13 @@ port_of() {
   case "$1" in
     postgres) echo "$POSTGRES_PORT" ;; mysql) echo "$MYSQL_PORT" ;;
     mongo) echo "$MONGO_PORT" ;;       redis) echo "$REDIS_PORT" ;;
+    qdrant) echo "$QDRANT_PORT" ;;
   esac
 }
 
 internal_port_of() {
   case "$1" in
-    postgres) echo 5432 ;; mysql) echo 3306 ;; mongo) echo 27017 ;; redis) echo 6379 ;;
+    postgres) echo 5432 ;; mysql) echo 3306 ;; mongo) echo 27017 ;; redis) echo 6379 ;; qdrant) echo 6333 ;;
   esac
 }
 
@@ -123,12 +126,14 @@ url_of() {
     mysql)    echo "mysql://$DB_USER:$DB_PASSWORD@$host:$port/$DB_NAME" ;;
     mongo)    echo "mongodb://$DB_USER:$DB_PASSWORD@$host:$port/$DB_NAME?authSource=admin" ;;
     redis)    echo "redis://$host:$port/0" ;;
+    qdrant)   echo "http://$host:$port" ;;
   esac
 }
 
 ui_of() {
   case "$1" in
     postgres|mysql) echo adminer ;; mongo) echo mongo-express ;; redis) echo redis-commander ;;
+    qdrant) ;; # trae su propio panel en /dashboard, no hay contenedor aparte
   esac
 }
 
@@ -137,6 +142,7 @@ ui_url_of() {
     adminer) echo "http://localhost:$ADMINER_PORT" ;;
     mongo-express) echo "http://localhost:$MONGO_EXPRESS_PORT" ;;
     redis-commander) echo "http://localhost:$REDIS_COMMANDER_PORT" ;;
+    qdrant-dashboard) echo "http://localhost:$QDRANT_PORT/dashboard" ;;
   esac
 }
 
@@ -234,7 +240,7 @@ cmd_up() {
     profiles+=(--profile "$db")
     if [[ $ui == 1 ]]; then
       u="$(ui_of "$db")"
-      [[ " ${uis[*]-} " == *" $u "* ]] || uis+=("$u")
+      [[ -z $u || " ${uis[*]-} " == *" $u "* ]] || uis+=("$u")
     fi
   done
   for u in "${uis[@]}"; do profiles+=(--profile "$u"); done
@@ -253,6 +259,7 @@ cmd_up() {
 
   for db in "${dbs[@]}"; do ok "$db listo → $(url_of "$db")"; done
   for u in "${uis[@]}"; do ok "$u → $(ui_url_of "$u")"; done
+  [[ " ${dbs[*]} " == *" qdrant "* ]] && ok "qdrant-dashboard → $(ui_url_of qdrant-dashboard)"
   info "${C_DIM}Siguiente: 'devdb env' para las variables de conexión, 'devdb shell <db>' para una consola.${C_OFF}"
 }
 
@@ -293,8 +300,10 @@ cmd_status() {
         "$db" "$state" "$health" "$(port_of "$db")" "$(url_of "$db")" "$(url_of "$db" docker)"
     done
     printf '],"ui":['; first=1
-    for u in adminer mongo-express redis-commander; do
-      line="$(lookup "$u")"; state="${line%%$'\t'*}"; [[ -z $line ]] && state="absent"
+    for u in adminer mongo-express redis-commander qdrant-dashboard; do
+      # El panel de Qdrant vive dentro del propio contenedor de qdrant.
+      if [[ $u == qdrant-dashboard ]]; then line="$(lookup qdrant)"; else line="$(lookup "$u")"; fi
+      state="${line%%$'\t'*}"; [[ -z $line ]] && state="absent"
       (( first )) || printf ','; first=0
       printf '{"name":"%s","state":"%s","url":"%s"}' "$u" "$state" "$(ui_url_of "$u")"
     done
@@ -356,7 +365,32 @@ cmd_shell() {
     mysql)    exec_in "${tty[@]}" -e MYSQL_PWD="$DB_PASSWORD" mysql mysql -u "$DB_USER" "$DB_NAME" "$@" ;;
     mongo)    exec_in "${tty[@]}" mongo mongosh --quiet -u "$DB_USER" -p "$DB_PASSWORD" --authenticationDatabase admin "$DB_NAME" "$@" ;;
     redis)    exec_in "${tty[@]}" redis redis-cli "$@" ;;
+    qdrant)   qdrant_http "$@" ;;
   esac
+}
+
+# Qdrant no tiene cliente de consola: `shell qdrant` es un atajo a su API REST vía curl.
+# devdb shell qdrant [GET|POST|PUT|PATCH|DELETE] /ruta ['<json>' | -]   (- = cuerpo desde stdin)
+qdrant_http() {
+  if (( $# == 0 )); then
+    info "Qdrant no tiene consola; usa su API REST o el panel web:"
+    info "  devdb shell qdrant GET /collections"
+    info "  devdb shell qdrant PUT /collections/docs '{\"vectors\":{\"size\":384,\"distance\":\"Cosine\"}}'"
+    info "  Panel: $(ui_url_of qdrant-dashboard)"
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || die "Se necesita curl en tu máquina para 'devdb shell qdrant'."
+  local method=GET path body=()
+  if [[ $1 != /* ]]; then method="${1^^}"; shift; fi
+  path="${1:-}"
+  [[ $path == /* ]] || usage_error "Uso: devdb shell qdrant [GET|POST|PUT|PATCH|DELETE] /ruta ['<json>' | -]"
+  if [[ -n "${2:-}" ]]; then
+    if [[ $2 == - ]]; then body=(--data-binary @-); else body=(--data-binary "$2"); fi
+    body+=(-H "Content-Type: application/json")
+  fi
+  # Cualquier error HTTP o de red se reporta como 1, igual que el resto del CLI.
+  curl -sS --fail-with-body -X "$method" "${body[@]}" "http://localhost:$QDRANT_PORT$path" || exit 1
+  echo
 }
 
 cmd_logs() {
@@ -416,6 +450,7 @@ ${C_BOLD}USO${C_OFF}
   devdb url <db> [--docker]               Imprime la URL de conexión (--docker: host interno de la red)
   devdb env [--all] [--docker]            Imprime POSTGRES_URL=... etc. (para .env o eval)
   devdb shell <db> [-- args...]           Consola: psql, mysql, mongosh o redis-cli
+  devdb shell qdrant [MÉTODO] /ruta [json] API REST de Qdrant (vía curl)
   devdb logs [db] [--follow]              Logs de los contenedores
   devdb reset <db>                        Borra los datos de una base y re-ejecuta init/<db>/
   devdb install [--skill]                 Instala 'devdb' en ~/.local/bin (y el skill de Claude Code)
@@ -432,6 +467,7 @@ ${C_BOLD}EJEMPLOS${C_OFF}
   devdb env >> .env                       # conecta tu app
   devdb shell postgres -- -c 'select 1'   # consulta puntual (ideal para scripts/agentes)
   devdb shell mysql < schema.sql          # ejecuta un archivo SQL
+  devdb up qdrant --ram                   # base vectorial para agentes / RAG
   devdb status --json | jq                # estado legible por máquinas
 
 ${C_BOLD}CÓDIGOS DE SALIDA${C_OFF}  0 ok · 1 error · 2 uso incorrecto
