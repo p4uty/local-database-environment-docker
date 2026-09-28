@@ -20,6 +20,7 @@ integración, CI, prototipos y **agentes de IA**.
 - [Uso rápido](#uso-rápido)
 - [Referencia del CLI](#referencia-del-cli)
 - [Temporal vs. persistente](#temporal-vs-persistente)
+- [pgvector (opcional)](#pgvector-opcional)
 - [Servicios, puertos y credenciales](#servicios-puertos-y-credenciales)
 - [Configuración (.env)](#configuración-env)
 - [Esquemas y datos semilla](#esquemas-y-datos-semilla)
@@ -37,6 +38,7 @@ integración, CI, prototipos y **agentes de IA**.
 
 - **Elige tus bases de datos:** levanta solo las que necesitas (`postgres`, `mysql`, `mongo`, `redis`, `qdrant` o `all`).
 - **Base de datos vectorial incluida:** [Qdrant](https://qdrant.tech) para RAG, búsqueda semántica y memoria de agentes.
+- **pgvector opcional:** activa la búsqueda vectorial dentro de PostgreSQL con `--pgvector`.
 - **Temporal o persistente:** datos en RAM (se borran al recrear) o en volúmenes de Docker (sobreviven reinicios).
 - **Asistente interactivo** para humanos y **flags + salida JSON** para scripts y agentes.
 - **Espera real a que estén listas:** healthchecks en cada base; `up` no termina hasta que aceptan conexiones.
@@ -99,6 +101,9 @@ Almacenamiento:
 
 Paneles web:
   ¿Incluir paneles web (Adminer, Mongo Express, Redis Commander)? [S/n] s
+
+PostgreSQL:
+  ¿Activar pgvector (búsqueda vectorial dentro de Postgres)? [s/N] n
 ```
 
 Tu elección se recuerda: la próxima vez propone los mismos valores, y `devdb up` sin argumentos (fuera de una terminal
@@ -109,7 +114,8 @@ interactiva) repite la última selección.
 ```sh
 devdb up postgres                   # PostgreSQL en RAM + Adminer
 devdb up mysql mongo --persist      # MySQL y MongoDB con datos persistentes
-devdb up all --no-ui                # las 4 bases, sin paneles web
+devdb up all --no-ui                # todas las bases, sin paneles web
+devdb up postgres --pgvector        # PostgreSQL con la extensión vector activada
 devdb status                        # qué está corriendo y cómo conectarse
 devdb shell postgres                # consola psql
 devdb down                          # detener todo
@@ -122,7 +128,7 @@ devdb down                          # detener todo
 | Comando | Descripción |
 |---|---|
 | `devdb` | Asistente interactivo (igual que `devdb up` sin argumentos). |
-| `devdb up [dbs...] [--ram\|--persist] [--ui\|--no-ui]` | Levanta las bases indicadas y **espera** a que estén listas. Por defecto: RAM y con paneles. |
+| `devdb up [dbs...] [--ram\|--persist] [--ui\|--no-ui] [--pgvector\|--no-pgvector]` | Levanta las bases indicadas y **espera** a que estén listas. Por defecto: RAM, con paneles y sin pgvector. Las opciones se recuerdan para la próxima vez. |
 | `devdb down [--volumes]` | Detiene y elimina los contenedores. `--volumes` también **borra los datos persistentes**. |
 | `devdb status [--json]` | Estado, salud y URL de cada servicio. |
 | `devdb url <db> [--docker]` | Imprime la URL de conexión. `--docker` usa el host interno de la red Docker. |
@@ -164,6 +170,36 @@ almacenamiento. Los datos del modo anterior no se migran.
 
 ---
 
+## pgvector (opcional)
+
+[pgvector](https://github.com/pgvector/pgvector) agrega búsqueda vectorial a PostgreSQL: guardas los embeddings en la
+misma tabla que tus datos y los consultas con SQL. Es útil si tu app ya usa Postgres y no quieres otra base de datos.
+Si prefieres una base vectorial dedicada, usa [Qdrant](#servicios-puertos-y-credenciales).
+
+```sh
+devdb up postgres --pgvector         # activa pgvector (se recuerda en los siguientes `up`)
+devdb up postgres --no-pgvector      # vuelve a la imagen oficial de Postgres
+```
+
+Con `--pgvector`, devdb usa la imagen `pgvector/pgvector:<PGVECTOR_VERSION>-pg<versión mayor de POSTGRES_VERSION>`
+(por defecto `pgvector/pgvector:0.8.6-pg15`) y ejecuta `CREATE EXTENSION IF NOT EXISTS vector` en `devdb`, también
+sobre volúmenes persistentes que ya existían.
+
+```sql
+CREATE TABLE docs (id serial PRIMARY KEY, texto text, emb vector(384));
+CREATE INDEX ON docs USING hnsw (emb vector_cosine_ops);
+SELECT texto FROM docs ORDER BY emb <=> '[0.1, 0.2, ...]' LIMIT 5;   -- <=> distancia coseno
+```
+
+> ⚠️ La imagen oficial de Postgres usa **Alpine** y la de pgvector usa **Debian**, que ordenan el texto de forma
+> distinta. Si activas o desactivas pgvector sobre **datos persistentes** con índices en columnas de texto, ejecuta
+> `REINDEX DATABASE devdb;` o empieza limpio con `devdb reset postgres`. devdb te avisa cuando pasa.
+
+Sin el CLI, define la imagen en `.env`: `POSTGRES_IMAGE=pgvector/pgvector:0.8.6-pg15` y crea la extensión una vez con
+`CREATE EXTENSION vector;` (o en un script de `init/postgres/`).
+
+---
+
 ## Servicios, puertos y credenciales
 
 Valores por defecto (todos configurables en `.env`):
@@ -199,6 +235,8 @@ Todas las variables son opcionales. Las más útiles:
 | `QDRANT_PORT`, `QDRANT_GRPC_PORT` | `6333`, `6334` | Puertos REST y gRPC de Qdrant |
 | `ADMINER_PORT`, `MONGO_EXPRESS_PORT`, `REDIS_COMMANDER_PORT` | `8080`, `8081`, `8082` | Puertos de los paneles |
 | `POSTGRES_VERSION`, `MYSQL_VERSION`, `MONGO_VERSION`, `REDIS_VERSION`, `QDRANT_VERSION` | `15-alpine`, `8.0-oracle`, `7.0-jammy`, `7-alpine`, `v1.19.1` | Tag de cada imagen (p. ej. `POSTGRES_VERSION=17-alpine`) |
+| `PGVECTOR_VERSION` | `0.8.6` | Versión de pgvector que usa `--pgvector` |
+| `POSTGRES_IMAGE` | — | Imagen completa de Postgres; tiene prioridad sobre `POSTGRES_VERSION` y `--pgvector` |
 | `BIND_ADDRESS` | `127.0.0.1` | `0.0.0.0` para acceder desde otros equipos de tu red |
 
 Las credenciales solo se aplican cuando la base se **crea**. Si las cambias en modo persistente, ejecuta
@@ -301,6 +339,28 @@ pg = create_engine(os.environ["POSTGRES_URL"])  # driver psycopg2
 my = create_engine(os.environ["MYSQL_URL"].replace("mysql://", "mysql+pymysql://"))
 mongo = MongoClient(os.environ["MONGO_URL"])
 r = redis.Redis.from_url(os.environ["REDIS_URL"])
+```
+</details>
+
+<details>
+<summary><b>pgvector</b> (Python, LangChain)</summary>
+
+```python
+# pip install psycopg[binary] pgvector
+import os, psycopg
+from pgvector.psycopg import register_vector
+
+conn = psycopg.connect(os.environ["POSTGRES_URL"], autocommit=True)
+register_vector(conn)
+conn.execute("CREATE TABLE IF NOT EXISTS docs (id bigserial PRIMARY KEY, texto text, emb vector(384))")
+filas = conn.execute("SELECT texto FROM docs ORDER BY emb <=> %s LIMIT 5", (mi_embedding,)).fetchall()
+```
+
+```python
+# LangChain: pip install langchain-postgres  (requiere el driver psycopg 3 en la URL)
+from langchain_postgres import PGVector
+store = PGVector(embeddings=mis_embeddings, collection_name="docs",
+                 connection=os.environ["POSTGRES_URL"].replace("postgresql://", "postgresql+psycopg://"))
 ```
 </details>
 
@@ -487,6 +547,7 @@ Perfiles disponibles: `postgres`, `mysql`, `mongo`, `redis`, `qdrant`, `adminer`
 | `No se puede hablar con el daemon de Docker` | Inicia Docker. En Linux, agrega tu usuario al grupo `docker` o usa Docker rootless. |
 | `up` tarda mucho la primera vez | Está descargando las imágenes. Las siguientes veces arranca en segundos. |
 | Timeout en `up` | Revisa `devdb logs <db>`. Puedes ampliar la espera con `DEVDB_TIMEOUT=300`. |
+| `type "vector" does not exist` | pgvector no está activo: `devdb up postgres --pgvector`. |
 | Mis scripts de `init/` no se ejecutaron | Solo corren con la base vacía. Usa `devdb reset <db>`. |
 | Los datos desaparecieron | Estabas en modo RAM. Usa `--persist`. |
 | `devdb requiere bash >= 4` (macOS) | `brew install bash`. |

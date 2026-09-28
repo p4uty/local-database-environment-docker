@@ -5,7 +5,7 @@ Para **usar** el entorno desde otro proyecto, consulta el skill en [`skills/devd
 
 ## Qué es
 
-Un entorno local de bases de datos de prueba (PostgreSQL, MySQL, MongoDB, Redis, Qdrant vectorial y paneles web) sobre Docker Compose,
+Un entorno local de bases de datos de prueba (PostgreSQL con pgvector opcional, MySQL, MongoDB, Redis, Qdrant vectorial y paneles web) sobre Docker Compose,
 con un CLI en Bash (`devdb`) que sirve tanto a humanos (asistente interactivo) como a scripts y agentes (flags, `--json`,
 códigos de salida). No hay código de aplicación ni build; la documentación de usuario (`README.md`) está en español.
 
@@ -25,6 +25,8 @@ códigos de salida). No hay código de aplicación ni build; la documentación d
 
 ```sh
 ./devdb up postgres redis --ram --no-ui   # levantar (espera healthchecks)
+./devdb up postgres --pgvector            # Postgres con la extensión vector
+./devdb shell qdrant GET /collections     # API REST de Qdrant
 ./devdb status --json                     # estado legible por máquina
 ./devdb down [--volumes]                  # detener
 bash -n devdb                             # validar sintaxis del CLI
@@ -43,6 +45,10 @@ exporta otros antes de probar (p. ej. `POSTGRES_PORT=15432 ./devdb up postgres`)
 - **Perfiles:** cada base tiene perfil `<db>` y cada panel `<nombre-del-panel>`; todos tienen además `all`. El CLI
   asigna los paneles en `ui_of()` (postgres/mysql → adminer, mongo → mongo-express, redis → redis-commander).
   Qdrant no tiene contenedor de panel: su dashboard va integrado (`qdrant-dashboard` en `status` es virtual).
+- **pgvector es una variante de la imagen de Postgres, no un servicio aparte:** `compose.yml` usa
+  `${POSTGRES_IMAGE:-postgres:${POSTGRES_VERSION}}`. Con `--pgvector` (guardado como `PGVECTOR` en `.devdb.state`),
+  `compose()` exporta `POSTGRES_IMAGE` con `pgvector_image()` (misma versión mayor que `POSTGRES_VERSION`), salvo que
+  el usuario la haya definido en `.env`. Tras `up`/`reset`, `enable_pgvector()` ejecuta `CREATE EXTENSION IF NOT EXISTS vector`.
 - **Qdrant no tiene cliente de consola:** `devdb shell qdrant` es `qdrant_http()`, un atajo a su API REST vía `curl`
   en el host. Su imagen no trae curl/wget; por eso el healthcheck usa `/dev/tcp` de bash.
 - **Nombre de proyecto `devdb`, red `devdb-net`:** son fijos. Otros proyectos se conectan a la red por nombre y

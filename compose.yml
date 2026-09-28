@@ -18,7 +18,8 @@ networks:
 
 services:
   postgres:
-    image: postgres:${POSTGRES_VERSION:-15-alpine}
+    # POSTGRES_IMAGE permite usar otra imagen compatible (p. ej. pgvector/pgvector:0.8.6-pg15; `devdb up --pgvector` la fija sola).
+    image: ${POSTGRES_IMAGE:-postgres:${POSTGRES_VERSION:-15-alpine}}
     profiles: [postgres, all]
     restart: unless-stopped
     environment:

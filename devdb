@@ -37,6 +37,8 @@ QDRANT_PORT="${QDRANT_PORT:-6333}"
 ADMINER_PORT="${ADMINER_PORT:-8080}"
 MONGO_EXPRESS_PORT="${MONGO_EXPRESS_PORT:-8081}"
 REDIS_COMMANDER_PORT="${REDIS_COMMANDER_PORT:-8082}"
+POSTGRES_VERSION="${POSTGRES_VERSION:-15-alpine}"
+PGVECTOR_VERSION="${PGVECTOR_VERSION:-0.8.6}"
 
 # ---------- Utilidades de salida ----------
 
@@ -77,15 +79,15 @@ interactive() { [[ -t 0 && -t 1 && -z "${CI:-}" ]]; }
 
 # ---------- Estado (última selección) ----------
 
-S_DBS="" S_MODE="ram" S_UI="1"
+S_DBS="" S_MODE="ram" S_UI="1" S_PGVECTOR="0"
 load_state() {
   [[ -f "$STATE_FILE" ]] || return 0
   # shellcheck disable=SC1090
   source "$STATE_FILE"
-  S_DBS="${DBS:-}" S_MODE="${MODE:-ram}" S_UI="${UI:-1}"
+  S_DBS="${DBS:-}" S_MODE="${MODE:-ram}" S_UI="${UI:-1}" S_PGVECTOR="${PGVECTOR:-0}"
 }
-save_state() {
-  printf 'DBS="%s"\nMODE="%s"\nUI="%s"\n' "$1" "$2" "$3" > "$STATE_FILE"
+save_state() { # save_state <dbs> <modo> <ui> <pgvector>
+  printf 'DBS="%s"\nMODE="%s"\nUI="%s"\nPGVECTOR="%s"\n' "$1" "$2" "$3" "$4" > "$STATE_FILE"
 }
 
 # ---------- Docker Compose ----------
@@ -96,9 +98,21 @@ check_docker() {
   docker info >/dev/null 2>&1 || die "No se puede hablar con el daemon de Docker. ¿Está corriendo? ¿Tu usuario tiene permisos?"
 }
 
+# Imagen de pgvector con la misma versión mayor de Postgres (15-alpine → pgvector/pgvector:<v>-pg15).
+pgvector_image() {
+  local major="${POSTGRES_VERSION%%[-.]*}"
+  [[ $major =~ ^[0-9]+$ ]] || die "POSTGRES_VERSION='$POSTGRES_VERSION' no indica una versión mayor; pgvector la necesita (p. ej. 15-alpine)."
+  echo "pgvector/pgvector:${PGVECTOR_VERSION}-pg${major}"
+}
+
 # compose <modo> [args...] — modo: ram | persist
+# Con pgvector activo (estado o --pgvector) usa su imagen, salvo que POSTGRES_IMAGE ya esté definida en .env.
 compose() {
   local mode="$1"; shift
+  if [[ ${PGVECTOR_ACTIVE:-$S_PGVECTOR} == 1 && -z "${POSTGRES_IMAGE:-}" ]]; then
+    POSTGRES_IMAGE="$(pgvector_image)"
+    export POSTGRES_IMAGE
+  fi
   docker compose --project-directory "$ROOT" -f "$ROOT/compose.yml" -f "$ROOT/compose.$mode.yml" "$@"
 }
 
@@ -175,7 +189,15 @@ ask_yn() { # ask_yn "pregunta" default(y|n)
   [[ $ans == y || $ans == s || $ans == si || $ans == sí || $ans == yes ]]
 }
 
-interactive_setup() { # sets SEL_DBS, SEL_MODE, SEL_UI
+# Crea la extensión en DB_NAME (idempotente). Hace falta también sobre volúmenes que ya existían antes de activarla.
+enable_pgvector() {
+  local out
+  out="$(compose "$1" --profile postgres exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -qU "$DB_USER" -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS vector" 2>&1)" ||
+    { printf '%s\n' "$out" >&2; die "No se pudo activar la extensión pgvector."; }
+}
+
+interactive_setup() { # sets SEL_DBS, SEL_MODE, SEL_UI, SEL_PGVECTOR
   load_state
   local defaults=" ${S_DBS:-postgres} " db def
   SEL_DBS=()
@@ -199,13 +221,20 @@ interactive_setup() { # sets SEL_DBS, SEL_MODE, SEL_UI
   printf '\n%sPaneles web:%s\n' "$C_BOLD" "$C_OFF" >&2
   [[ $S_UI == 1 ]] && def=y || def=n
   if ask_yn "¿Incluir paneles web (Adminer, Mongo Express, Redis Commander)?" "$def"; then SEL_UI=1; else SEL_UI=0; fi
+
+  SEL_PGVECTOR="$S_PGVECTOR"
+  if [[ " ${SEL_DBS[*]} " == *" postgres "* ]]; then
+    printf '\n%sPostgreSQL:%s\n' "$C_BOLD" "$C_OFF" >&2
+    [[ $S_PGVECTOR == 1 ]] && def=y || def=n
+    if ask_yn "¿Activar pgvector (búsqueda vectorial dentro de Postgres)?" "$def"; then SEL_PGVECTOR=1; else SEL_PGVECTOR=0; fi
+  fi
   echo >&2
 }
 
 # ---------- Comandos ----------
 
 cmd_up() {
-  local dbs=() mode="" ui="" arg db
+  local dbs=() mode="" ui="" pgv="" arg db
   while (($#)); do
     arg="$1"; shift
     case "$arg" in
@@ -213,6 +242,8 @@ cmd_up() {
       --persist|--persistent) mode=persist ;;
       --ui) ui=1 ;;
       --no-ui) ui=0 ;;
+      --pgvector) pgv=1 ;;
+      --no-pgvector) pgv=0 ;;
       all) dbs=("${ALL_DBS[@]}") ;;
       -*) usage_error "Opción desconocida para 'up': $arg" ;;
       *) db="$(require_db "$arg")"; dbs+=("$db") ;;
@@ -222,9 +253,9 @@ cmd_up() {
   check_docker
   load_state
   if (( ${#dbs[@]} == 0 )); then
-    if interactive && [[ -z $mode && -z $ui ]]; then
+    if interactive && [[ -z $mode && -z $ui && -z $pgv ]]; then
       interactive_setup
-      dbs=("${SEL_DBS[@]}") mode="$SEL_MODE" ui="$SEL_UI"
+      dbs=("${SEL_DBS[@]}") mode="$SEL_MODE" ui="$SEL_UI" pgv="$SEL_PGVECTOR"
     elif [[ -n $S_DBS ]]; then
       read -r -a dbs <<<"$S_DBS"
       info "${C_DIM}Usando la última selección: ${dbs[*]}${C_OFF}"
@@ -232,7 +263,9 @@ cmd_up() {
       usage_error "Indica qué bases de datos levantar, p. ej.: devdb up postgres redis"
     fi
   fi
-  mode="${mode:-$S_MODE}" ui="${ui:-$S_UI}"
+  mode="${mode:-$S_MODE}" ui="${ui:-$S_UI}" pgv="${pgv:-$S_PGVECTOR}"
+  PGVECTOR_ACTIVE="$pgv"
+  local has_pg=0; [[ " ${dbs[*]} " == *" postgres "* ]] && has_pg=1
 
   # Si cambia el modo de almacenamiento, los contenedores se recrean con el nuevo montaje.
   local profiles=() uis=() u
@@ -246,16 +279,24 @@ cmd_up() {
   for u in "${uis[@]}"; do profiles+=(--profile "$u"); done
 
   local label; [[ $mode == ram ]] && label="temporal (RAM)" || label="persistente (volumen)"
-  info "Levantando ${C_BOLD}${dbs[*]}${C_OFF} · almacenamiento ${C_BOLD}$label${C_OFF}${uis[*]:+ · paneles: ${uis[*]}}"
+  # La imagen oficial es Alpine (musl) y la de pgvector Debian (glibc): ordenan texto distinto, así que
+  # cambiar de imagen sobre datos persistentes puede dejar índices de texto inconsistentes.
+  if (( has_pg )) && [[ $mode == persist && $pgv != "$S_PGVECTOR" ]] &&
+     docker volume inspect devdb_postgres-data >/dev/null 2>&1; then
+    warn "Cambias la imagen de postgres sobre datos existentes (Alpine ↔ Debian). Si tienes índices sobre columnas de texto, ejecuta REINDEX DATABASE $DB_NAME; o empieza limpio con: devdb reset postgres"
+  fi
+  local extra=""; (( has_pg )) && [[ $pgv == 1 ]] && extra=" · postgres con pgvector"
+  info "Levantando ${C_BOLD}${dbs[*]}${C_OFF} · almacenamiento ${C_BOLD}$label${C_OFF}${uis[*]:+ · paneles: ${uis[*]}}$extra"
 
   local out
   if ! out="$(compose "$mode" "${profiles[@]}" up -d --wait --wait-timeout "${DEVDB_TIMEOUT:-180}" --remove-orphans 2>&1)"; then
     printf '%s\n' "$out" >&2
     die "No se pudo levantar el entorno. Revisa: devdb logs <db>  (¿puerto ocupado? cámbialo en .env)"
   fi
+  (( has_pg )) && [[ $pgv == 1 ]] && enable_pgvector "$mode"
   # El estado guarda todo lo que quedó corriendo (lo nuevo más lo que ya estaba).
   local running; running="$(running_dbs | tr '\n' ' ')"
-  save_state "${running% }" "$mode" "$ui"
+  save_state "${running% }" "$mode" "$ui" "$pgv"
 
   for db in "${dbs[@]}"; do ok "$db listo → $(url_of "$db")"; done
   for u in "${uis[@]}"; do ok "$u → $(ui_url_of "$u")"; done
@@ -291,7 +332,8 @@ cmd_status() {
   lookup() { awk -F'\t' -v s="$1" '$1==s{print $2"\t"$3}' <<<"$states"; }
 
   if (( json )); then
-    printf '{"mode":"%s","databases":[' "$S_MODE"
+    local pgv_json=false; [[ $S_PGVECTOR == 1 ]] && pgv_json=true
+    printf '{"mode":"%s","pgvector":%s,"databases":[' "$S_MODE" "$pgv_json"
     for db in "${ALL_DBS[@]}"; do
       line="$(lookup "$db")"; state="${line%%$'\t'*}"; health="${line#*$'\t'}"
       [[ -z $line ]] && state="absent" health="none"
@@ -312,7 +354,9 @@ cmd_status() {
   fi
 
   local label; [[ $S_MODE == ram ]] && label="temporal (RAM)" || label="persistente (volumen)"
-  printf '%sAlmacenamiento:%s %s\n\n' "$C_BOLD" "$C_OFF" "$label"
+  printf '%sAlmacenamiento:%s %s\n' "$C_BOLD" "$C_OFF" "$label"
+  [[ $S_PGVECTOR == 1 ]] && printf '%spgvector:%s activo en postgres\n' "$C_BOLD" "$C_OFF"
+  echo
   printf '%-16s %-10s %-10s %s\n' SERVICIO ESTADO SALUD CONEXIÓN
   for db in "${ALL_DBS[@]}" adminer mongo-express redis-commander; do
     line="$(lookup "$db")"
@@ -411,6 +455,7 @@ cmd_reset() {
   local out
   out="$(compose "$S_MODE" --profile "$db" up -d --wait --wait-timeout "${DEVDB_TIMEOUT:-180}" "$db" 2>&1)" ||
     { printf '%s\n' "$out" >&2; die "No se pudo recrear $db."; }
+  [[ $db == postgres && $S_PGVECTOR == 1 ]] && enable_pgvector "$S_MODE"
   ok "$db reiniciado → $(url_of "$db")"
 }
 
@@ -443,7 +488,7 @@ ${C_BOLD}devdb${C_OFF} $VERSION — bases de datos de prueba locales con Docker
 
 ${C_BOLD}USO${C_OFF}
   devdb                                   Asistente interactivo (igual que 'devdb up' sin argumentos)
-  devdb up [dbs...] [--ram|--persist] [--ui|--no-ui]
+  devdb up [dbs...] [--ram|--persist] [--ui|--no-ui] [--pgvector|--no-pgvector]
                                           Levanta y espera a que estén listas. dbs: ${ALL_DBS[*]} | all
   devdb down [--volumes]                  Detiene todo. --volumes borra también los datos persistentes
   devdb status [--json]                   Estado, salud y URLs de conexión
@@ -468,6 +513,7 @@ ${C_BOLD}EJEMPLOS${C_OFF}
   devdb shell postgres -- -c 'select 1'   # consulta puntual (ideal para scripts/agentes)
   devdb shell mysql < schema.sql          # ejecuta un archivo SQL
   devdb up qdrant --ram                   # base vectorial para agentes / RAG
+  devdb up postgres --pgvector            # Postgres con la extensión vector activada
   devdb status --json | jq                # estado legible por máquinas
 
 ${C_BOLD}CÓDIGOS DE SALIDA${C_OFF}  0 ok · 1 error · 2 uso incorrecto
