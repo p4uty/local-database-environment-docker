@@ -1,12 +1,12 @@
 ---
 name: devdb
-description: Levanta, consulta y destruye bases de datos locales de prueba (PostgreSQL, MySQL, MongoDB, Redis) con el CLI `devdb`. Úsalo cuando necesites una base de datos real para ejecutar la app, correr tests de integración, probar migraciones o consultas SQL/Mongo/Redis, u obtener una URL de conexión (DATABASE_URL, REDIS_URL, etc.) en desarrollo local.
+description: Levanta, consulta y destruye bases de datos locales de prueba (PostgreSQL, MySQL, MongoDB, Redis y la base vectorial Qdrant) con el CLI `devdb`. Úsalo cuando necesites una base de datos real para ejecutar la app, correr tests de integración, probar migraciones o consultas SQL/Mongo/Redis, una base vectorial para RAG, embeddings o memoria de agentes, u obtener una URL de conexión (DATABASE_URL, REDIS_URL, QDRANT_URL, etc.) en desarrollo local.
 ---
 
 # devdb — bases de datos de prueba locales
 
-`devdb` es un CLI (envoltorio de Docker Compose) que levanta PostgreSQL, MySQL, MongoDB y Redis
-en contenedores, espera a que estén listos y entrega las URLs de conexión.
+`devdb` es un CLI (envoltorio de Docker Compose) que levanta PostgreSQL, MySQL, MongoDB, Redis y Qdrant
+(base de datos vectorial) en contenedores, espera a que estén listos y entrega las URLs de conexión.
 
 ## Antes de empezar
 
@@ -36,11 +36,11 @@ devdb down                                # al terminar, si tú lo levantaste
 
 | Comando | Qué hace |
 |---|---|
-| `devdb up <dbs...> [--ram\|--persist] [--no-ui]` | Levanta y espera healthcheck. dbs: `postgres mysql mongo redis all` |
+| `devdb up <dbs...> [--ram\|--persist] [--no-ui]` | Levanta y espera healthcheck. dbs: `postgres mysql mongo redis qdrant all` |
 | `devdb status --json` | Estado, salud (`healthy`), puertos y URLs de cada base |
 | `devdb url <db>` | URL desde el host (`localhost`) |
 | `devdb url <db> --docker` | URL desde otro contenedor en la red `devdb-net` (host = nombre del servicio) |
-| `devdb env [--all]` | Líneas `POSTGRES_URL=...`, `MYSQL_URL=...`, `MONGO_URL=...`, `REDIS_URL=...` |
+| `devdb env [--all]` | Líneas `POSTGRES_URL=...`, `MYSQL_URL=...`, `MONGO_URL=...`, `REDIS_URL=...`, `QDRANT_URL=...` |
 | `devdb shell <db> -- <args>` | Ejecuta el cliente nativo dentro del contenedor |
 | `devdb reset <db>` | Borra los datos de esa base y re-ejecuta sus scripts de `init/` |
 | `devdb logs <db>` | Últimas líneas del log (útil si `up` falla) |
@@ -57,10 +57,26 @@ devdb shell redis    -- GET mi-clave
 devdb shell postgres < schema.sql
 ```
 
+## Base de datos vectorial (Qdrant)
+
+Para RAG, búsqueda semántica o memoria de agentes usa Qdrant (`devdb up qdrant --ram`). No tiene consola:
+`devdb shell qdrant` llama a su API REST (requiere `curl` en el host). El tamaño del vector (`size`) debe coincidir
+con el modelo de embeddings que uses.
+
+```sh
+devdb shell qdrant GET /collections
+devdb shell qdrant PUT /collections/docs '{"vectors":{"size":384,"distance":"Cosine"}}'
+devdb shell qdrant PUT '/collections/docs/points?wait=true' - < puntos.json   # cuerpo desde stdin
+devdb shell qdrant POST /collections/docs/points/query '{"query":[...],"limit":5,"with_payload":true}'
+```
+
+En código usa `QDRANT_URL` (`devdb url qdrant`) con el cliente oficial (`qdrant-client`, `@qdrant/js-client-rest`)
+o integraciones como `langchain-qdrant`. Panel web: `http://localhost:<puerto>/dashboard`.
+
 ## Credenciales por defecto
 
-Usuario `dev`, contraseña `devpass`, base `devdb` (iguales en las 4; Redis sin contraseña).
-Puertos: 5432, 3306, 27017, 6379. Se cambian en el `.env` del repo de devdb; **no asumas los valores**:
+Usuario `dev`, contraseña `devpass`, base `devdb` (iguales en las 4 bases clásicas; Redis y Qdrant sin autenticación).
+Puertos: 5432, 3306, 27017, 6379, 6333 (Qdrant REST) y 6334 (Qdrant gRPC). Se cambian en el `.env` del repo de devdb; **no asumas los valores**:
 obtén siempre la URL real con `devdb url <db>`.
 
 ## Si algo falla

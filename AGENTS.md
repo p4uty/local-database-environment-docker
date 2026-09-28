@@ -5,7 +5,7 @@ Para **usar** el entorno desde otro proyecto, consulta el skill en [`skills/devd
 
 ## Qué es
 
-Un entorno local de bases de datos de prueba (PostgreSQL, MySQL, MongoDB, Redis y paneles web) sobre Docker Compose,
+Un entorno local de bases de datos de prueba (PostgreSQL, MySQL, MongoDB, Redis, Qdrant vectorial y paneles web) sobre Docker Compose,
 con un CLI en Bash (`devdb`) que sirve tanto a humanos (asistente interactivo) como a scripts y agentes (flags, `--json`,
 códigos de salida). No hay código de aplicación ni build; la documentación de usuario (`README.md`) está en español.
 
@@ -42,6 +42,9 @@ exporta otros antes de probar (p. ej. `POSTGRES_PORT=15432 ./devdb up postgres`)
   bloque de configuración de `devdb` y en `.env.example`. Si cambias uno, cambia los tres.
 - **Perfiles:** cada base tiene perfil `<db>` y cada panel `<nombre-del-panel>`; todos tienen además `all`. El CLI
   asigna los paneles en `ui_of()` (postgres/mysql → adminer, mongo → mongo-express, redis → redis-commander).
+  Qdrant no tiene contenedor de panel: su dashboard va integrado (`qdrant-dashboard` en `status` es virtual).
+- **Qdrant no tiene cliente de consola:** `devdb shell qdrant` es `qdrant_http()`, un atajo a su API REST vía `curl`
+  en el host. Su imagen no trae curl/wget; por eso el healthcheck usa `/dev/tcp` de bash.
 - **Nombre de proyecto `devdb`, red `devdb-net`:** son fijos. Otros proyectos se conectan a la red por nombre y
   `devdb reset` asume los volúmenes `devdb_<db>-data`.
 - **stdout = datos, stderr = mensajes.** Los comandos `url`, `env` y `status --json` deben seguir produciendo salida
@@ -54,5 +57,6 @@ exporta otros antes de probar (p. ej. `POSTGRES_PORT=15432 ./devdb up postgres`)
 
 1. Servicio en `compose.yml` con perfiles `[<db>, all]`, healthcheck, puerto con `BIND_ADDRESS` y variables del `.env`.
 2. Entradas en `compose.ram.yml` y `compose.persist.yml` (+ volumen).
-3. En `devdb`: `ALL_DBS`, `normalize_db`, `port_of`, `internal_port_of`, `url_of`, `ui_of`, `cmd_shell`.
+3. En `devdb`: `ALL_DBS`, `normalize_db`, `port_of`, `internal_port_of`, `url_of`, `ui_of`, `cmd_shell`
+   (y el bloque de configuración con su puerto por defecto).
 4. `.env.example`, `init/<db>/` si la imagen soporta scripts de init, `README.md` y `skills/devdb/SKILL.md`.

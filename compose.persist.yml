@@ -15,9 +15,13 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+  qdrant:
+    volumes:
+      - qdrant-data:/qdrant/storage
 
 volumes:
   postgres-data:
   mysql-data:
   mongo-data:
   redis-data:
+  qdrant-data:
